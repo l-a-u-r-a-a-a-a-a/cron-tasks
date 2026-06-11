@@ -1,0 +1,52 @@
+name: Check events
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: event-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      # Cron minimum is 5 minutes; loop inside the job for ~1-minute checks
+      - name: Check for new events (1-min loop)
+        run: |
+          for i in 1 2 3 4 5; do
+            node scripts/check-tickets.js
+            [ $i -lt 5 ] && sleep 60
+          done
+        env:
+          MONITOR_BASE_URL: ${{ secrets.MONITOR_BASE_URL }}
+          SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION }}
+          SEARCH_RANGE: ${{ vars.SEARCH_RANGE }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add known_ids.txt watchlist_state.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
+          git pull --rebase origin main
+          git push

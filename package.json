@@ -1,0 +1,9 @@
+{
+  "name": "event-monitor",
+  "version": "1.0.0",
+  "description": "Event listing monitor with email/WhatsApp alerts",
+  "main": "scripts/check-tickets.js",
+  "dependencies": {
+    "nodemailer": "^6.9.0"
+  }
+}
