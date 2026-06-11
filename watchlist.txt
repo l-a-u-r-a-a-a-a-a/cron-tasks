@@ -1,4 +1,2 @@
-# Watched events — one event ID per line (just the number).
-# Checked every run; alerts when sold-out tickets become available again.
-# Use bare IDs only — do not paste full URLs into this public file.
+# One ID per line.
 364223

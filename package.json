@@ -1,7 +1,7 @@
 {
-  "name": "event-monitor",
+  "name": "cron-tasks",
   "version": "1.0.0",
-  "description": "Event listing monitor with email/WhatsApp alerts",
+  "description": "",
   "main": "scripts/check-tickets.js",
   "dependencies": {
     "nodemailer": "^6.9.0"

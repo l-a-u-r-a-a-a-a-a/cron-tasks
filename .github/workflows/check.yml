@@ -1,4 +1,4 @@
-name: Check events
+name: tasks
 
 on:
   schedule:

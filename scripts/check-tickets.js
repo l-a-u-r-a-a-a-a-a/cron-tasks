@@ -17,9 +17,14 @@ if (!RAW_BASE) {
 }
 
 const BASE_URL = RAW_BASE.replace(/\/+$/, '');
+// Site-specific markers are assembled at runtime so they don't appear as
+// indexable literals in public code search
+const HIDE_PARAM = ['hide', 'soldout'].join('');
+const QTY_CLASS = ['ticket', 'quantity', 'select'].join('-');
+const NAME_ATTR = ['data', 'ticket', 'name'].join('-');
 const SEARCH_URL =
   `${BASE_URL}/events?event=&location=${encodeURIComponent(LOCATION)}` +
-  `&range=${RANGE}&genre=&daterange=&hidesoldout=True&sort=newest`;
+  `&range=${RANGE}&genre=&daterange=&${HIDE_PARAM}=True&sort=newest`;
 const KNOWN_IDS_FILE = path.join(__dirname, '..', 'known_ids.txt');
 const WATCHLIST_FILE = path.join(__dirname, '..', 'watchlist.txt');
 const WATCHLIST_STATE_FILE = path.join(__dirname, '..', 'watchlist_state.json');
@@ -135,8 +140,10 @@ function saveWatchlistState(state) {
 // A ticket type is available when its quantity dropdown offers a value > 0
 function parseAvailableTickets(html) {
   const available = [];
-  const selectRegex =
-    /<select[^>]*ticket-quantity-select[^>]*data-ticket-name="([^"]*)"[^>]*>([\s\S]*?)<\/select>/g;
+  const selectRegex = new RegExp(
+    `<select[^>]*${QTY_CLASS}[^>]*${NAME_ATTR}="([^"]*)"[^>]*>([\\s\\S]*?)</select>`,
+    'g'
+  );
   let match;
   while ((match = selectRegex.exec(html)) !== null) {
     const name = decodeHtmlEntities(match[1]);
