@@ -30,7 +30,7 @@ jobs:
         run: |
           for i in 1 2 3 4 5; do
             node scripts/check-tickets.js
-            [ $i -lt 5 ] && sleep 60
+            if [ "$i" -lt 5 ]; then sleep 60; fi
           done
         env:
           MONITOR_BASE_URL: ${{ secrets.MONITOR_BASE_URL }}
