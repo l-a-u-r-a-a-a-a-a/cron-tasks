@@ -2,6 +2,10 @@ name: tasks
 
 on:
   schedule:
+    # Best-effort heartbeat. GitHub heavily throttles high-frequency crons,
+    # so this only acts as a "start the next long run" trigger — the job
+    # itself runs for hours and the concurrency group serialises them so
+    # they hand off back-to-back for continuous coverage.
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
@@ -12,6 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     permissions:
       contents: write
 
@@ -25,13 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # Cron minimum is 5 minutes; loop inside the job for ~1-minute checks
-      - name: Check for new events (1-min loop)
-        run: |
-          for i in 1 2 3 4 5; do
-            node scripts/check-tickets.js
-            if [ "$i" -lt 5 ]; then sleep 60; fi
-          done
+      # One long-running job: check every minute for ~5h40m, then exit.
+      # A pending scheduled run takes over the moment this one ends.
+      - name: Check loop (~1-minute interval)
         env:
           MONITOR_BASE_URL: ${{ secrets.MONITOR_BASE_URL }}
           SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION }}
@@ -41,12 +42,30 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-
-      - name: Commit updated state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add known_ids.txt watchlist_state.json 2>/dev/null || true
-          git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
-          git pull --rebase origin main
-          git push
+
+          commit_state() {
+            git add known_ids.txt watchlist_state.json 2>/dev/null || true
+            if ! git diff --staged --quiet; then
+              git commit -q -m "chore: update state [skip ci]"
+              git pull --rebase --autostash -q origin main || true
+              git push -q || true
+            fi
+          }
+
+          # Run for ~5h40m, leaving buffer under the 355-min job timeout
+          END=$(( $(date +%s) + 340 * 60 ))
+          i=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            # Keep the loop alive through transient network/site errors
+            node scripts/check-tickets.js || echo "check failed this iteration — continuing"
+            i=$((i + 1))
+            # Persist state to the repo every ~10 minutes so a killed job
+            # doesn't lose progress
+            if [ $((i % 10)) -eq 0 ]; then commit_state; fi
+            sleep 60
+          done
+
+          commit_state
