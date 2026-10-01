@@ -51,6 +51,7 @@ function parseEvents(html) {
     events.push({
       id: match[3],
       title: decodeHtmlEntities(match[1]),
+      path: match[2], // /events/NNNNNN-slug — host-agnostic, so links can be built per subdomain
       url: BASE_URL + match[2],
     });
   }
@@ -240,28 +241,50 @@ async function sendWhatsApp(message) {
   console.log('WhatsApp response:', res.status);
 }
 
-async function sendEmail(subject, body) {
-  const emailTo = process.env.EMAIL_TO;
+// Low-level send: everyone goes in BCC so recipients can't see each other.
+async function sendMail(recipients, subject, body) {
   const emailFrom = process.env.EMAIL_FROM;
   const emailPassword = process.env.EMAIL_PASSWORD;
-  // Optional: extra recipients (friends), comma-separated. BCC'd so their
-  // addresses stay private from each other.
-  const emailBcc = (process.env.EMAIL_BCC || '')
-    .split(',')
-    .map((a) => a.trim())
-    .filter(Boolean);
-  if (!emailTo || !emailFrom || !emailPassword) {
-    console.log('Email skipped (no credentials)');
+  const list = [...new Set((recipients || []).map((r) => (r || '').trim()).filter(Boolean))];
+  if (!emailFrom || !emailPassword || list.length === 0) {
+    console.log('Email skipped (no credentials or no recipients)');
     return;
   }
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: emailFrom, pass: emailPassword },
   });
-  const mail = { from: emailFrom, to: emailTo, subject, text: body };
-  if (emailBcc.length > 0) mail.bcc = emailBcc;
-  await transporter.sendMail(mail);
-  console.log(`Email sent${emailBcc.length ? ` (+${emailBcc.length} bcc)` : ''}`);
+  await transporter.sendMail({ from: emailFrom, to: emailFrom, bcc: list, subject, text: body });
+  console.log(`Email sent to ${list.length} recipient(s)`);
+}
+
+// Convenience for the monitor owner's own messages (live notice, watchlist).
+async function sendEmail(subject, body) {
+  await sendMail([process.env.EMAIL_TO], subject, body);
+}
+
+// Map base URL -> list of emails. The owner (EMAIL_TO) is on the monitored
+// site; friends on other TFG subdomains come from the RECIPIENTS_JSON secret,
+// e.g. {"https://nhs.ticketsforgood.co.uk":["a@x.com"],"https://charities.ticketsforgood.co.uk":["b@y.com"]}
+// Each group is emailed links on its own subdomain. Base URLs live in a secret
+// so no subdomains or emails appear in this public repo.
+function recipientGroups() {
+  const groups = {};
+  const add = (base, email) => {
+    if (!base || !email) return;
+    const b = String(base).replace(/\/+$/, '');
+    (groups[b] = groups[b] || new Set()).add(String(email).trim());
+  };
+  if (process.env.EMAIL_TO) add(BASE_URL, process.env.EMAIL_TO);
+  try {
+    const parsed = JSON.parse(process.env.RECIPIENTS_JSON || '{}');
+    for (const [base, emails] of Object.entries(parsed)) {
+      for (const e of [].concat(emails)) add(base, e);
+    }
+  } catch (err) {
+    console.error('RECIPIENTS_JSON is not valid JSON — ignoring friends:', err.message);
+  }
+  return groups;
 }
 
 async function main() {
@@ -292,18 +315,19 @@ async function main() {
   for (const e of newEvents) knownIds.add(e.id);
   saveKnownIds(knownIds);
 
-  // WhatsApp: cap at 5 to stay within URL length limits
+  // WhatsApp: owner only, links on the monitored site. Cap at 5 for URL length.
   const waSlice = newEvents.slice(0, 5);
   const waLines = waSlice.map((e) => `• ${e.title}\n  ${e.url}`).join('\n\n');
   const waSuffix = newEvents.length > 5 ? `\n\n...and ${newEvents.length - 5} more` : '';
   await sendWhatsApp(`${newEvents.length} new ${LOCATION} event(s)!\n\n${waLines}${waSuffix}`);
 
-  // Email: full list
-  const emailLines = newEvents.map((e) => `• ${e.title}\n  ${e.url}`).join('\n\n');
-  await sendEmail(
-    `${newEvents.length} new ${LOCATION} event(s)`,
-    `${newEvents.length} new event(s) found:\n\n${emailLines}`
-  );
+  // Email: one message per subdomain group, with links pointing at that
+  // group's own site (the event catalogue is shared across subdomains).
+  const subject = `${newEvents.length} new ${LOCATION} event(s)`;
+  for (const [base, emailSet] of Object.entries(recipientGroups())) {
+    const lines = newEvents.map((e) => `• ${e.title}\n  ${base}${e.path}`).join('\n\n');
+    await sendMail([...emailSet], subject, `${newEvents.length} new event(s) found:\n\n${lines}`);
+  }
 }
 
 main().catch((err) => {
