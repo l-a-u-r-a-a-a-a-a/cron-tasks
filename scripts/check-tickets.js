@@ -244,6 +244,12 @@ async function sendEmail(subject, body) {
   const emailTo = process.env.EMAIL_TO;
   const emailFrom = process.env.EMAIL_FROM;
   const emailPassword = process.env.EMAIL_PASSWORD;
+  // Optional: extra recipients (friends), comma-separated. BCC'd so their
+  // addresses stay private from each other.
+  const emailBcc = (process.env.EMAIL_BCC || '')
+    .split(',')
+    .map((a) => a.trim())
+    .filter(Boolean);
   if (!emailTo || !emailFrom || !emailPassword) {
     console.log('Email skipped (no credentials)');
     return;
@@ -252,8 +258,10 @@ async function sendEmail(subject, body) {
     service: 'gmail',
     auth: { user: emailFrom, pass: emailPassword },
   });
-  await transporter.sendMail({ from: emailFrom, to: emailTo, subject, text: body });
-  console.log('Email sent');
+  const mail = { from: emailFrom, to: emailTo, subject, text: body };
+  if (emailBcc.length > 0) mail.bcc = emailBcc;
+  await transporter.sendMail(mail);
+  console.log(`Email sent${emailBcc.length ? ` (+${emailBcc.length} bcc)` : ''}`);
 }
 
 async function main() {
