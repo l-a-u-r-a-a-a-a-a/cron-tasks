@@ -229,6 +229,15 @@ function saveKnownIds(ids) {
   fs.writeFileSync(KNOWN_IDS_FILE, [...ids].join('\n'));
 }
 
+// Low-level WhatsApp send to one phone via CallMeBot.
+async function sendWhatsAppTo(phone, apikey, message) {
+  if (!phone || !apikey) return;
+  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(message)}&apikey=${encodeURIComponent(apikey)}`;
+  const res = await fetch(url);
+  console.log(`WhatsApp response (${phone}):`, res.status);
+}
+
+// Owner-only WhatsApp (used for the live notice and watchlist alerts).
 async function sendWhatsApp(message) {
   const phone = process.env.WHATSAPP_PHONE;
   const apikey = process.env.WHATSAPP_APIKEY;
@@ -236,9 +245,27 @@ async function sendWhatsApp(message) {
     console.log('WhatsApp skipped (no credentials)');
     return;
   }
-  const url = `https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${encodeURIComponent(message)}&apikey=${apikey}`;
-  const res = await fetch(url);
-  console.log('WhatsApp response:', res.status);
+  await sendWhatsAppTo(phone, apikey, message);
+}
+
+// All WhatsApp recipients with their own subdomain for links: the owner
+// (WHATSAPP_PHONE/APIKEY on BASE_URL) plus friends from WHATSAPP_RECIPIENTS_JSON,
+// e.g. [{"phone":"+44...","apikey":"123","base":"https://nhs.ticketsforgood.co.uk"}]
+function whatsappRecipients() {
+  const list = [];
+  if (process.env.WHATSAPP_PHONE && process.env.WHATSAPP_APIKEY) {
+    list.push({ phone: process.env.WHATSAPP_PHONE, apikey: process.env.WHATSAPP_APIKEY, base: BASE_URL });
+  }
+  try {
+    for (const r of JSON.parse(process.env.WHATSAPP_RECIPIENTS_JSON || '[]')) {
+      if (r && r.phone && r.apikey) {
+        list.push({ phone: r.phone, apikey: r.apikey, base: String(r.base || BASE_URL).replace(/\/+$/, '') });
+      }
+    }
+  } catch (err) {
+    console.error('WHATSAPP_RECIPIENTS_JSON is not valid JSON — ignoring:', err.message);
+  }
+  return list;
 }
 
 // Low-level send: everyone goes in BCC so recipients can't see each other.
@@ -315,11 +342,14 @@ async function main() {
   for (const e of newEvents) knownIds.add(e.id);
   saveKnownIds(knownIds);
 
-  // WhatsApp: owner only, links on the monitored site. Cap at 5 for URL length.
+  // WhatsApp: one message per recipient, links on their own subdomain.
+  // Cap at 5 events to stay within URL length limits.
   const waSlice = newEvents.slice(0, 5);
-  const waLines = waSlice.map((e) => `• ${e.title}\n  ${e.url}`).join('\n\n');
   const waSuffix = newEvents.length > 5 ? `\n\n...and ${newEvents.length - 5} more` : '';
-  await sendWhatsApp(`${newEvents.length} new ${LOCATION} event(s)!\n\n${waLines}${waSuffix}`);
+  for (const r of whatsappRecipients()) {
+    const waLines = waSlice.map((e) => `• ${e.title}\n  ${r.base}${e.path}`).join('\n\n');
+    await sendWhatsAppTo(r.phone, r.apikey, `${newEvents.length} new ${LOCATION} event(s)!\n\n${waLines}${waSuffix}`);
+  }
 
   // Email: one message per subdomain group, with links pointing at that
   // group's own site (the event catalogue is shared across subdomains).
