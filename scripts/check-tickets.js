@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // ---- Configuration (all via environment variables / repository secrets) ----
 // MONITOR_BASE_URL (required, secret) — base URL of the site to monitor,
@@ -22,15 +23,30 @@ const BASE_URL = RAW_BASE.replace(/\/+$/, '');
 const HIDE_PARAM = ['hide', 'soldout'].join('');
 const QTY_CLASS = ['ticket', 'quantity', 'select'].join('-');
 const NAME_ATTR = ['data', 'ticket', 'name'].join('-');
-const SEARCH_URL =
-  `${BASE_URL}/events?event=&location=${encodeURIComponent(LOCATION)}` +
-  `&range=${RANGE}&genre=&daterange=&${HIDE_PARAM}=True&sort=newest`;
 const KNOWN_IDS_FILE = path.join(__dirname, '..', 'known_ids.txt');
 const WATCHLIST_FILE = path.join(__dirname, '..', 'watchlist.txt');
 const WATCHLIST_STATE_FILE = path.join(__dirname, '..', 'watchlist_state.json');
 
-function pageUrl(page) {
-  return page === 1 ? SEARCH_URL : `${SEARCH_URL}&page=${page}`;
+// Build the newest-first search URL for any subdomain base. Each subdomain can
+// list events the others don't, so every subscribed subdomain is scraped.
+function searchUrl(base) {
+  return (
+    `${base}/events?event=&location=${encodeURIComponent(LOCATION)}` +
+    `&range=${RANGE}&genre=&daterange=&${HIDE_PARAM}=True&sort=newest`
+  );
+}
+
+function pageUrl(base, page) {
+  const u = searchUrl(base);
+  return page === 1 ? u : `${u}&page=${page}`;
+}
+
+// Per-subdomain state file. The owner's base keeps known_ids.txt for
+// continuity; others use a short hash so no subdomain name appears in the repo.
+function knownIdsFile(base) {
+  if (base === BASE_URL) return KNOWN_IDS_FILE;
+  const h = crypto.createHash('sha1').update(base).digest('hex').slice(0, 10);
+  return path.join(__dirname, '..', `known_${h}.txt`);
 }
 
 function decodeHtmlEntities(str) {
@@ -42,7 +58,7 @@ function decodeHtmlEntities(str) {
     .replace(/&quot;/g, '"');
 }
 
-function parseEvents(html) {
+function parseEvents(html, base) {
   const events = [];
   const regex =
     /<a class="btn[^"]*stretched-link btn-primary"[^>]*data-name="([^"]+)"[^>]*href="(\/events\/(\d+)-[^"]+)"/g;
@@ -52,7 +68,7 @@ function parseEvents(html) {
       id: match[3],
       title: decodeHtmlEntities(match[1]),
       path: match[2], // /events/NNNNNN-slug — host-agnostic, so links can be built per subdomain
-      url: BASE_URL + match[2],
+      url: base + match[2],
     });
   }
   return events;
@@ -62,20 +78,20 @@ function hasNextPage(html, page) {
   return html.includes(`page=${page + 1}`);
 }
 
-async function fetchPage(page) {
-  const res = await fetch(pageUrl(page));
+async function fetchPage(base, page) {
+  const res = await fetch(pageUrl(base, page));
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching page ${page}`);
   const html = await res.text();
-  return { events: parseEvents(html), hasNext: hasNextPage(html, page) };
+  return { events: parseEvents(html, base), hasNext: hasNextPage(html, page) };
 }
 
-// First run: collect every event across all pages
-async function fetchAllEvents() {
+// First run for a subdomain: collect every event across all pages
+async function fetchAllEvents(base) {
   const all = [];
   let page = 1;
   while (true) {
     console.log(`  Fetching page ${page}...`);
-    const { events, hasNext } = await fetchPage(page);
+    const { events, hasNext } = await fetchPage(base, page);
     all.push(...events);
     if (!hasNext || events.length === 0) break;
     page++;
@@ -85,12 +101,12 @@ async function fetchAllEvents() {
 
 // Subsequent runs: keep fetching pages while every event on the page is new.
 // Stops as soon as we hit a known event — no point looking further back.
-async function fetchNewEvents(knownIds) {
+async function fetchNewEvents(base, knownIds) {
   const newEvents = [];
   let page = 1;
   while (true) {
     console.log(`  Fetching page ${page}...`);
-    const { events, hasNext } = await fetchPage(page);
+    const { events, hasNext } = await fetchPage(base, page);
     if (events.length === 0) break;
 
     const pageNew = events.filter((e) => !knownIds.has(e.id));
@@ -216,17 +232,17 @@ async function checkWatchlist() {
   }
 }
 
-function loadKnownIds() {
+function loadKnownIds(file) {
   try {
-    const content = fs.readFileSync(KNOWN_IDS_FILE, 'utf8');
+    const content = fs.readFileSync(file, 'utf8');
     return new Set(content.split('\n').filter(Boolean));
   } catch {
-    return null; // null signals first run
+    return null; // null signals first run for this subdomain
   }
 }
 
-function saveKnownIds(ids) {
-  fs.writeFileSync(KNOWN_IDS_FILE, [...ids].join('\n'));
+function saveKnownIds(file, ids) {
+  fs.writeFileSync(file, [...ids].join('\n'));
 }
 
 // Low-level WhatsApp send to one phone via CallMeBot.
@@ -317,46 +333,64 @@ function recipientGroups() {
 async function main() {
   await checkWatchlist();
 
-  const knownIds = loadKnownIds();
+  const emailGroups = recipientGroups(); // base -> Set(emails)
+  const waList = whatsappRecipients(); // [{phone, apikey, base}]
 
-  if (knownIds === null) {
-    console.log('First run — fetching all pages to seed known_ids.txt...');
-    const allEvents = await fetchAllEvents();
-    if (allEvents.length === 0) {
-      console.error('WARNING: 0 events parsed — HTML structure may have changed');
-      process.exit(1);
+  // Scrape every subdomain that has at least one subscriber (plus the owner's).
+  // Each subdomain can list events the others don't, so each is checked
+  // independently against its own known-events file.
+  const bases = new Set([BASE_URL, ...Object.keys(emailGroups), ...waList.map((r) => r.base)]);
+
+  for (const base of bases) {
+    const label = base === BASE_URL ? 'owner site' : base.replace(/^https?:\/\//, '').split('.')[0];
+    console.log(`\n=== Checking ${label} ===`);
+    const file = knownIdsFile(base);
+    const knownIds = loadKnownIds(file);
+
+    // First time we've seen this subdomain: seed silently, don't alert.
+    if (knownIds === null) {
+      console.log('  First check — seeding known events, no alerts');
+      const allEvents = await fetchAllEvents(base);
+      if (allEvents.length === 0) {
+        console.error('  WARNING: 0 events parsed — skipping (will retry next cycle)');
+        continue;
+      }
+      console.log(`  Seeding ${allEvents.length} events`);
+      saveKnownIds(file, new Set(allEvents.map((e) => e.id)));
+      // The owner's very first run gets a one-off "live" confirmation.
+      if (base === BASE_URL) {
+        const msg = `Event monitor is live! Watching for new ${LOCATION} events. Currently tracking ${allEvents.length} events.`;
+        await sendWhatsApp(msg);
+        await sendEmail('Event monitor is live!', msg);
+      }
+      continue;
     }
-    console.log(`Seeding ${allEvents.length} events`);
-    saveKnownIds(new Set(allEvents.map((e) => e.id)));
-    const msg = `Event monitor is live! Watching for new ${LOCATION} events. Currently tracking ${allEvents.length} events.`;
-    await sendWhatsApp(msg);
-    await sendEmail('Event monitor is live!', msg);
-    return;
-  }
 
-  console.log('Checking for new events...');
-  const newEvents = await fetchNewEvents(knownIds);
-  console.log(`${newEvents.length} new event(s) found`);
-  if (newEvents.length === 0) return;
+    const newEvents = await fetchNewEvents(base, knownIds);
+    console.log(`  ${newEvents.length} new event(s)`);
+    if (newEvents.length === 0) continue;
 
-  for (const e of newEvents) knownIds.add(e.id);
-  saveKnownIds(knownIds);
+    for (const e of newEvents) knownIds.add(e.id);
+    saveKnownIds(file, knownIds);
 
-  // WhatsApp: one message per recipient, links on their own subdomain.
-  // Cap at 5 events to stay within URL length limits.
-  const waSlice = newEvents.slice(0, 5);
-  const waSuffix = newEvents.length > 5 ? `\n\n...and ${newEvents.length - 5} more` : '';
-  for (const r of whatsappRecipients()) {
-    const waLines = waSlice.map((e) => `• ${e.title}\n  ${r.base}${e.path}`).join('\n\n');
-    await sendWhatsAppTo(r.phone, r.apikey, `${newEvents.length} new ${LOCATION} event(s)!\n\n${waLines}${waSuffix}`);
-  }
+    // Email: the recipients subscribed to THIS subdomain, links on this site.
+    const emails = [...(emailGroups[base] || [])];
+    if (emails.length > 0) {
+      const lines = newEvents.map((e) => `• ${e.title}\n  ${base}${e.path}`).join('\n\n');
+      await sendMail(
+        emails,
+        `${newEvents.length} new ${LOCATION} event(s)`,
+        `${newEvents.length} new event(s) found:\n\n${lines}`
+      );
+    }
 
-  // Email: one message per subdomain group, with links pointing at that
-  // group's own site (the event catalogue is shared across subdomains).
-  const subject = `${newEvents.length} new ${LOCATION} event(s)`;
-  for (const [base, emailSet] of Object.entries(recipientGroups())) {
-    const lines = newEvents.map((e) => `• ${e.title}\n  ${base}${e.path}`).join('\n\n');
-    await sendMail([...emailSet], subject, `${newEvents.length} new event(s) found:\n\n${lines}`);
+    // WhatsApp: recipients on THIS subdomain, links on this site. Cap at 5.
+    const waSlice = newEvents.slice(0, 5);
+    const waSuffix = newEvents.length > 5 ? `\n\n...and ${newEvents.length - 5} more` : '';
+    const waLines = waSlice.map((e) => `• ${e.title}\n  ${base}${e.path}`).join('\n\n');
+    for (const r of waList.filter((x) => x.base === base)) {
+      await sendWhatsAppTo(r.phone, r.apikey, `${newEvents.length} new ${LOCATION} event(s)!\n\n${waLines}${waSuffix}`);
+    }
   }
 }
 

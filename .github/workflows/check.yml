@@ -39,15 +39,17 @@ jobs:
           SEARCH_RANGE: ${{ vars.SEARCH_RANGE }}
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           WHATSAPP_APIKEY: ${{ secrets.WHATSAPP_APIKEY }}
+          WHATSAPP_RECIPIENTS_JSON: ${{ secrets.WHATSAPP_RECIPIENTS_JSON }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          RECIPIENTS_JSON: ${{ secrets.RECIPIENTS_JSON }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           commit_state() {
-            git add known_ids.txt watchlist_state.json 2>/dev/null || true
+            git add known_ids.txt known_*.txt watchlist_state.json 2>/dev/null || true
             if ! git diff --staged --quiet; then
               git commit -q -m "chore: update state [skip ci]"
               git pull --rebase --autostash -q origin main || true
